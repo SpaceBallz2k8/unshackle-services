@@ -26,7 +26,7 @@ class PLEX(Service):
     Service code for Plex's free streaming service (https://watch.plex.tv/).
 
     \b
-    Version: 1.0.5
+    Version: 1.0.7
     Author: stabbedbybrick
     Authorization: None
     Geofence: API and downloads are locked into whatever region the user is in
@@ -97,60 +97,57 @@ class PLEX(Service):
                 slug = result.get("Metadata", {}).get("slug")
 
                 yield SearchResult(
-                    id_=f"https://watch.plex.tv/{kind}/{slug}",
+                    id_=f"https://watch.plex.tv/movie/{slug}" if kind == "movie" else f"https://watch.plex.tv/show/{slug}",
                     title=result.get("Metadata", {}).get("title"),
                     description=result.get("Metadata", {}).get("description"),
                     label=kind,
-                    url=f"https://watch.plex.tv/{kind}/{slug}",
+                    url=f"https://watch.plex.tv/movie/{slug}" if kind == "movie" else f"https://watch.plex.tv/show/{slug}",
                 )
 
     def get_titles(self) -> Movies | Series:
         url_pattern = re.compile(
             r"^https://watch.plex.tv/"
+            r"(?:watch/)?"
             r"(?:[a-z]{2}(?:-[A-Z]{2})?/)??"
             r"(?P<type>movie|show)/"
             r"(?P<id>[\w-]+)"
             r"(?P<url_path>(/season/\d+/episode/\d+))?"
         )
 
-        # Handle deeplinks containing query parameters (e.g. ?uri=provider://...)
         parsed_url = urlparse(self.title)
         query_params = parse_qs(parsed_url.query)
+        
         if "uri" in query_params:
             uri_val = query_params["uri"][0]
-            match_meta = re.search(r'metadata/([a-f0-9]+)', uri_val)
-            if match_meta:
-                meta_id = match_meta.group(1)
-                # Query the playQueue/metadata directly via the provider endpoint
-                meta_data = self._request(
-                    "POST", "/playQueues",
-                    params={
-                        "uri": uri_val,
-                        "type": "video",
-                        "continuous": "1",
-                    },
-                )
-                media_item = next((x for x in meta_data.get("MediaContainer", {}).get("Metadata", [])), None)
-                if media_item:
-                    m_type = media_item.get("type")
-                    if m_type == "movie":
-                        return Movies(Movie(
-                            id_=media_item.get("ratingKey"),
-                            service=self.__class__,
-                            name=media_item.get("title"),
-                            year=media_item.get("year"),
-                            data=media_item,
-                        ))
-                    elif m_type == "episode":
-                        return Series(Episode(
-                            id_=media_item.get("ratingKey"),
-                            service=self.__class__,
-                            name=media_item.get("title"),
-                            season=int(media_item.get("parentIndex", 0)),
-                            number=int(media_item.get("index", 0)),
-                            title=re.sub(r"\s*\(\d{4}\)", "", media_item.get("grandparentTitle", "")),
-                            data=media_item,
-                        ))
+            meta_data = self._request(
+                "POST", "/playQueues",
+                params={
+                    "uri": uri_val,
+                    "type": "video",
+                    "continuous": "1",
+                },
+            )
+            media_item = next((x for x in meta_data.get("MediaContainer", {}).get("Metadata", [])), None)
+            if media_item:
+                m_type = media_item.get("type")
+                if m_type == "movie":
+                    return Movies(Movie(
+                        id_=media_item.get("ratingKey"),
+                        service=self.__class__,
+                        name=media_item.get("title"),
+                        year=media_item.get("year"),
+                        data=media_item,
+                    ))
+                elif m_type == "episode":
+                    return Series(Episode(
+                        id_=media_item.get("ratingKey"),
+                        service=self.__class__,
+                        name=media_item.get("title"),
+                        season=int(media_item.get("parentIndex", 0)),
+                        number=int(media_item.get("index", 0)),
+                        title=re.sub(r"\s*\(\d{4}\)", "", media_item.get("grandparentTitle", "")),
+                        data=media_item,
+                    ))
 
         match = url_pattern.match(self.title)
         if not match:
@@ -199,23 +196,10 @@ class PLEX(Service):
                 + self.config["endpoints"]["license"].format(media_key, self.auth_token)
             )
         else:
-            # Fallback construct aligned with HLS part resolution if manifest_clear key is missing
-            part_id = None
-            try:
-                part_id = media.get("Part", [{}])[0].get("id")
-            except Exception:
-                pass
-
-            if part_id:
-                manifest_url = (
-                    f"https://vod.provider.plex.tv/library/parts/{part_id}-hls.m3u8"
-                    f"?includeAllStreams=1&x-plex-product=Plex+Mediaverse&x-plex-token={self.auth_token}"
-                )
-            else:
-                manifest_url = (
-                    self.config["endpoints"]["base_url"]
-                    + self.config["endpoints"]["manifest_clear"].format(media_key, self.auth_token)
-                )
+            manifest_url = (
+                self.config["endpoints"]["base_url"]
+                + self.config["endpoints"]["manifest_clear"].format(media_key, self.auth_token)
+            )
             title.data["license_url"] = None
 
         tracks = manifest.from_url(manifest_url, self.session).to_tracks(language="en")
@@ -358,7 +342,6 @@ class PLEX(Service):
 
     def _request(self, method: str, endpoint: str, **kwargs: Any) -> Any[dict | str]:
         url = urljoin(self.config["endpoints"]["base_url"], endpoint)
-
         prep = self.session.prepare_request(Request(method, url, **kwargs))
 
         response = self.session.send(prep)
@@ -367,6 +350,5 @@ class PLEX(Service):
 
         try:
             return json.loads(response.content)
-
         except json.JSONDecodeError:
             return response.text
